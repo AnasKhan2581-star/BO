@@ -1,248 +1,387 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>🚀 Smart Crypto Breakout Scanner</title>
-<style>
- :root{--bg:#0c0c0c;--panel:#161616;--accent:#00ffae;--warn:#ffce00;
-       --pass:#16c784;--fail:#ff4957;--text:#e6e6e6;--border:#333;}
- *{box-sizing:border-box;margin:0;padding:0;font-family:Arial,Helvetica,sans-serif}
- body{background:var(--bg);color:var(--text);padding:12px}
- h1,h3{text-align:center}h1{color:var(--accent);font-size:5vw;margin:15px 0}
- select,input,button{background:var(--panel);color:var(--text);border:1px solid var(--border);
-   padding:10px;border-radius:8px;font-size:1.05em;width:225px}
- button:hover{background:#222;cursor:pointer}
- .container{max-width:1100px;margin:auto}
- .controls,.stats,.analysis-section{margin:18px 0;text-align:center}
- .trade-box{background:var(--panel);border-radius:10px;padding:16px;margin:24px auto;
-   max-width:750px;box-shadow:0 0 14px #0007}
- .trade-box h2{color:var(--accent);margin-bottom:8px;font-size:1.32em}
- .trade-box table{width:100%;border-collapse:collapse;margin-top:10px;font-size:.92em}
- .trade-box th,.trade-box td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left}
- .trade-box th{color:var(--warn)}
- .pass{color:var(--pass);font-weight:700}.fail{color:var(--fail);font-weight:700}
- .log-box{background:#111;border:1px solid #0a0;border-radius:8px;color:#0f0;font-family:monospace;
-          padding:10px;max-height:190px;overflow-y:auto}
-</style>
-</head>
-<body>
-<div class="container">
-  <h1>🚀 Smart Crypto Breakout Scanner</h1>
-
-  <div class="controls">
-    <label>Timeframe:</label><br>
-    <select id="timeframe">
-      <option value="15m">15 m</option><option value="30m">30 m</option>
-      <option value="1h" selected>1 h</option><option value="4h">4 h</option>
-      <option value="1d">1 d</option></select><br>
-    <label>Account Size ($):</label><br>
-    <input id="accountSize" type="number" min="100" step="100" value="1000"><br>
-    <label>Risk / Trade (%):</label><br>
-    <input id="riskPerTrade" type="number" min="0.1" max="5" step="0.1" value="1"><br>
-    <label>Min R:R:</label><br>
-    <input id="minRR" type="number" min="1" max="10" step="0.1" value="2"><br>
-    <label>Min Target %:</label><br>
-    <input id="minTargetPercent" type="number" min="4" max="20" step="0.1" value="5"><br>
-    <label>Volume Multiplier ×:</label><br>
-    <input id="volumeMultiplier" type="number" min="1" max="5" step="0.1" value="1.2"><br>
-    <button id="scanButton">🔍 Start Scan</button>
-  </div>
-
-  <div class="stats">
-    <span>Coins: <b id="coinsScanned">0</b></span> | 
-    <span>Qualified: <b id="qualifiedSetups">0</b></span> | 
-    <span>Avg R:R <b id="avgRR">0.0</b></span> | 
-    <span>Avg Target <b id="avgTarget">0.0%</b></span>
-  </div>
-
-  <div class="analysis-section">
-    <h3>🔬 Single-Coin Analysis</h3>
-    <input id="individualCoinInput" placeholder="BTCUSDT" style="width:260px">
-    <button id="analyzeCoinButton">Analyse</button>
-    <div id="individualAnalysisResult" style="margin-top:22px"></div>
-  </div>
-
-  <div id="scanResults" style="margin-top:34px"></div>
-  <div class="log-box" id="logBox">Ready to scan top 150 coins…</div>
-</div>
-
-<script>
-/* ----------  Utility functions ---------- */
-const API="https://api.binance.com";
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-const avg=a=>a.reduce((s,v)=>s+v,0)/a.length||0;
-const log=m=>{const box=document.getElementById("logBox");box.textContent+=`\n${new Date().toLocaleTimeString()} ${m}`;box.scrollTop=box.scrollHeight};
-
-/* ----------  Indicator helpers ---------- */
-const ema=(arr,n)=>{if(arr.length<n)return[];const k=2/(n+1);let e=[avg(arr.slice(0,n))];for(let i=n;i<arr.length;i++)e.push(arr[i]*k+e[i-n]*(1-k));return e};
-const macd=(c)=>{const fast=ema(c,12),slow=ema(c,26);if(!slow.length)return{macd:[],sig:[]};
- const m=fast.slice(-slow.length).map((v,i)=>v-slow[i]);return{macd:m,sig:ema(m,9)}};
-const rsi=(c,p=14)=>{if(c.length<p+1)return[];let g=[],l=[];for(let i=1;i<c.length;i++){const d=c[i]-c[i-1];g.push(d>0?d:0);l.push(d<0?-d:0)}
- let out=[];for(let i=p-1;i<g.length;i++){const ag=avg(g.slice(i-p+1,i+1)),al=avg(l.slice(i-p+1,i+1));out.push(al===0?100:100-100/(1+ag/al))}return out};
-const bollExp=(c)=>{const p=20;if(c.length<p+2)return false;const slice=c.slice(-p-2);
- const sma=avg(slice.slice(0,p)),var1=avg(slice.slice(0,p).map(x=>(x-sma)**2)),s1=Math.sqrt(var1);
- const sma2=avg(slice.slice(1,p+1)),var2=avg(slice.slice(1,p+1).map(x=>(x-sma2)**2)),s2=Math.sqrt(var2);
- return (s2-s1)/s1>0.15; // 15 % band expansion
-};
-
-/* ----------  Binance fetch helpers ---------- */
-const topCoins=async()=>{
-  const data=await fetch(`${API}/api/v3/ticker/24hr`).then(r=>r.json()).catch(()=>[]);
-  return data.filter(x=>x.symbol.endsWith("USDT")&&!/UP|DOWN|BULL|BEAR/.test(x.symbol))
-             .sort((a,b)=>+b.quoteVolume-+a.quoteVolume).slice(0,150);
-};
-const candles=async(s,i,l=400)=>{
-  const data=await fetch(`${API}/api/v3/klines?symbol=${s}&interval=${i}&limit=${l}`).then(r=>r.json()).catch(()=>null);
-  return data?data.map(d=>({o:+d[1],h:+d[2],l:+d[3],c:+d[4],v:+d[5],t:d[0]})):null;
-};
-
-/* ----------  Core analysis ---------- */
-async function analyse(sym,intv,opt){
-  try{
-    const cs=await candles(sym,intv);if(!cs||cs.length<80)return{error:"insufficient data"};
-    const closes=cs.map(x=>x.c),vols=cs.map(x=>x.v);
-    const last=cs.at(-2);           // last COMPLETED candle
-    const cur =cs.at(-1);           // current candle (still forming)
-    const avgVol=avg(vols.slice(-31,-1));  // 30-candle average, excl. current
-    const volOK=last.v>=avgVol*opt.volMult;
-
-    /* === Trend-leg detection via EMA 10/40 === */
-    const ema10=ema(closes,10),ema40=ema(closes,40);
-    if(!ema40.length)return{error:"ema"};
-    const inDown=ema10.slice(-ema40.length).map((v,i)=>v<ema40[i]);
-    // find longest recent continuous downleg >=12 bars, then up-leg >=6
-    let downEnd=-1;for(let i=inDown.length-1;i>=0;i--)if(!inDown[i]){downEnd=i;break;}
-    let downStart=downEnd;while(downStart>0&&inDown[downStart-1])downStart--;
-    const downLen=downEnd-downStart+1;
-    let upStart=downEnd+1,upEnd=upStart;while(upEnd<inDown.length&& !inDown[upEnd])upEnd++;const upLen=upEnd-upStart;
-    const structureOK=downLen>=12 && upLen>=6;
-
-    /* === Resistance range from revival leg === */
-    const revival=cs.slice(-(upLen+1),-1);
-    const resHi=Math.max(...revival.map(x=>x.h));
-    const resLo=Math.min(...revival.map(x=>x.h))*0.997; // tiny buffer
-    const broke=resHi>0 && cur.c>resHi*1.003;           // breakout?
-
-    /* === FVG targets ≥ minTargetPct === */
-    const fvg=[];for(let i=2;i<cs.length-2;i++){
-      const prev=cs[i-1],next=cs[i+1];
-      if(prev.h<next.l && next.l>cur.c){
-        const pct=(next.l-cur.c)/cur.c*100;
-        if(pct>=opt.minTargetPct)fvg.push({price:next.l,pct});
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>Breakout Setup Scanner</title>
+  <style>
+    body {
+      background: #181A20;
+      color: #EFEFEF;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+    }
+    h1 { font-size: 2em; margin: 0 0 0.5em 0; }
+    .container { max-width: 1100px; margin: auto; padding: 16px; }
+    .section { background: #23272F; padding: 18px; margin-bottom: 20px; border-radius: 10px; }
+    label, select, button {
+      font-size: 1em;
+      margin-top: 8px;
+      background: none;
+      border: none;
+      color: inherit;
+    }
+    button {
+      background: #FCD535;
+      color: #23272F;
+      font-weight: bold;
+      border-radius: 6px;
+      padding: 7px 20px;
+      margin-left: 10px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: #ffd966; }
+    .status { margin: 1em 0; font-size: 1.1em; }
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      min-width: 700px;
+      border-collapse: collapse;
+      margin-top: 1em;
+      background: #181A20;
+    }
+    th, td {
+      border: 1px solid #373737;
+      padding: 7px 8px;
+      text-align: center;
+      font-size: 0.97em;
+    }
+    th { background: #23272F; }
+    tr.success { background: #143b15; }
+    tr.fail { background: #231813; }
+    .mobile-hide { display: table-cell; }
+    @media (max-width:700px) {
+      .container { padding: 6px; }
+      table, thead, tbody, th, td, tr { display: block; width: 100%; }
+      th { display: none; }
+      .mobile-hide { display: none; }
+      td { border: none; border-bottom: 1px solid #2c2c2c; position: relative; padding-left: 48%; }
+      td:before {
+        position: absolute; left: 8px; top: 6px; font-weight: bold;
+        color: #888;
+        content: attr(data-label);
       }
     }
-    const targets=fvg.sort((a,b)=>a.price-b.price).slice(0,3);
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Breakout Setup Provider</h1>
+    <!-- ETH Section -->
+    <div class="section" id="eth-section">
+      <h2>ETH Live Breakout Monitoring</h2>
+      <form id="eth-form">
+        <label>Timeframe: 
+          <select id="eth-timeframe">
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m" selected>15m</option>
+            <option value="1h">1h</option>
+            <option value="4h">4h</option>
+            <option value="1d">1D</option>
+          </select>
+        </label>
+        <button type="button" onclick="startETHMonitor()">Start</button>
+      </form>
+      <div class="status" id="eth-status"></div>
+      <div id="eth-setup"></div>
+    </div>
+    <!-- Scanner Section -->
+    <div class="section" id="scanner-section">
+      <h2>Scanner: Top 150 (by volume) Breakout Setups</h2>
+      <form id="scanner-form">
+        <label>Scan Timeframe: 
+          <select id="scan-timeframe">
+            <option value="1m">1m</option>
+            <option value="5m">5m</option>
+            <option value="15m" selected>15m</option>
+            <option value="1h">1h</option>
+            <option value="4h">4h</option>
+          </select>
+        </label>
+        <button type="button" onclick="scanMarket()">Scan</button>
+      </form>
+      <div class="status" id="scan-status"></div>
+      <div class="table-wrap"><table id="results-table"></table></div>
+    </div>
+  </div>
+  <script>
+    const ETHSYMBOL = "ethusdt";
+    let ethWS = null, ethKlines = [];
+    let notificationSupported = ("Notification" in window);
 
-    /* === Indicator confirmations === */
-    const rsis=rsi(closes);const lastR=rsis.at(-1)||50;const rsiOK=lastR>50;
-    const mc=macd(closes);const macOK=mc.macd.at(-2)<mc.sig.at(-2)&&mc.macd.at(-1)>mc.sig.at(-1);
-    const bbOK=bollExp(closes);
-    const confirmCnt=[rsiOK,macOK,bbOK].filter(Boolean).length>=2;
+    // --------------- Technical Indicator Functions ---------------
 
-    /* === ATR stop & RR === */
-    const atr=avg(cs.slice(-14).map((c,i,a)=>i?Math.max(c.h-c.l,Math.abs(c.h-a[i-1].c),Math.abs(c.l-a[i-1].c)):0));
-    const stop=cur.c-2.5*atr;
-    const bestRR=targets.length?Math.max(...targets.map(t=>(t.price-cur.c)/(cur.c-stop))):0;
+    // Utils
+    function sma(data, len) {
+      if (data.length < len) return null;
+      return data.slice(-len).reduce((a,b)=>a+b,0) / len;
+    }
+    function ema(data, len) {
+      if (data.length < len) return null;
+      let k = 2/(len+1), ema = data[0];
+      for(let i=1; i<data.length; ++i)
+        ema = data[i]*k + ema*(1-k);
+      return ema;
+    }
+    function rsi(closes, len=14) {
+      if (closes.length < len+1) return null;
+      let gains=0, losses=0;
+      for(let i=1; i<=len; i++) {
+        let diff = closes[closes.length-i] - closes[closes.length-i-1];
+        if (diff > 0) gains += diff;
+        else losses -= diff;
+      }
+      const rs = gains/(losses || 1e-9);
+      return 100 - (100/(1+rs));
+    }
+    // StochRSI
+    function stochRsi(closes, len=14) {
+      if (closes.length<len+1) return null;
+      let rsiArr=[];
+      for(let i=0;i<=closes.length-len-1;i++)
+        rsiArr.push(rsi(closes.slice(i,i+len+1), len));
+      const lastRSI = rsiArr[rsiArr.length-1];
+      if (!lastRSI) return null;
+      const lowest = Math.min(...rsiArr);
+      const highest = Math.max(...rsiArr);
+      return ((lastRSI-lowest)/((highest-lowest)||1e-9))*100;
+    }
+    // MACD
+    function macd(closes, fast=12, slow=26, signal=9) {
+      if(closes.length<slow+signal) return {};
+      let fastEma=[];
+      for(let i=0;i<closes.length;i++)
+        fastEma.push(ema(closes.slice(0,i+1),fast));
+      let slowEma=[];
+      for(let i=0;i<closes.length;i++)
+        slowEma.push(ema(closes.slice(0,i+1),slow));
+      let macdArr = fastEma.map((v,i)=>v-slowEma[i]);
+      let signalArr=[];
+      for(let i=0;i<macdArr.length;i++)
+        signalArr.push(ema(macdArr.slice(0,i+1),signal));
+      return {
+        macd: macdArr[macdArr.length-1],
+        signal: signalArr[signalArr.length-1]
+      };
+    }
+    // ATR (Average True Range)
+    function atr(klines, len=14){
+      if (klines.length<len+1) return null;
+      let trs=[];
+      for(let i=1;i<klines.length;i++){
+        let h = klines[i][2], l = klines[i][3], c_prev = klines[i-1][4];
+        trs.push(Math.max(h-l, Math.abs(h-c_prev), Math.abs(l-c_prev)));
+      }
+      return sma(trs, len);
+    }
 
-    /* === Criteria list === */
-    const criteria=[
-      {n:"Last-Candle Volume ≥1.2×Avg",p:volOK,val:`${last.v.toLocaleString()} / ${avgVol.toLocaleString()}`},
-      {n:"Down-leg ≥12 bars",p:downLen>=12,val:`${downLen} bars`},
-      {n:"Revival ≥6 bars",p:upLen>=6,val:`${upLen} bars`},
-      {n:"Breaks Resistance Range",p:broke,val:`>${resHi.toFixed(6)}`},
-      {n:"FVG Targets ≥"+opt.minTargetPct+"%",p:targets.length>0,val:targets.length},
-      {n:"≥2 Confirm Indicators",p:confirmCnt,val:`RSI ${rsiOK?'✅':'❌'}, MACD ${macOK?'✅':'❌'}, BB ${bbOK?'✅':'❌'}`},
-      {n:`Risk/Reward ≥ ${opt.minRR}`,p:bestRR>=opt.minRR,val:bestRR.toFixed(2)}
-    ];
-    const passed=criteria.filter(x=>x.p).length;
-    const qualified=volOK&&passed>=5; // volume must pass + ≥4 others
+    // --------------- ETH Klines Monitoring (Live) ---------------
+    function startETHMonitor() {
+      const tf = document.getElementById('eth-timeframe').value;
+      let interval = tf;
+      document.getElementById('eth-status').innerText = 'Connecting...';
+      // Close previous WS if open
+      if (ethWS) ethWS.close();
+      ethKlines = [];
 
-    return{
-      sym,qualified,criteria,passed,need:5,
-      price:cur.c,resHi,resLo,stop:stop.toFixed(6),rr:bestRR.toFixed(2),
-      vol:last.v,avgVol,rsi:lastR.toFixed(1),targets
-    };
-  }catch(e){return{error:e.message}};
-}
+      // Open new WebSocket (Binance public API)
+      ethWS = new WebSocket(`wss://fstream.binance.com/ws/${ETHSYMBOL}@kline_${interval}`);
+      ethWS.onopen = () => {
+        document.getElementById('eth-status').innerHTML = "Live <b>ETH/USDT</b> klines loaded.";
+      };
+      ethWS.onclose = () => {
+        document.getElementById('eth-status').innerText = "Disconnected.";
+      };
+      ethWS.onerror = () => {
+        document.getElementById('eth-status').innerText = "WebSocket error!";
+      };
+      ethWS.onmessage = (msg) => {
+        const data = JSON.parse(msg.data);
+        const k = data.k;
+        if(!k.x) return; // Only process closed klines
+        let candle = [
+          Number(k.t), Number(k.o), Number(k.h),
+          Number(k.l), Number(k.c), Number(k.v)
+        ];
+        ethKlines.push(candle);
+        if(ethKlines.length>100) ethKlines.shift();
 
-/* ----------  Rendering ---------- */
-const row=c=>`<tr><td>${c.n}</td><td class="${c.p?'pass':'fail'}">${c.p?'✅':'❌'} ${c.val}</td></tr>`;
-function render(s,w){
-  const tgt=s.targets.length?s.targets.map(t=>`${t.price.toFixed(6)} (${t.pct.toFixed(1)}%)`).join(" → "):"No targets";
-  w.innerHTML+=`<div class="trade-box">
-   <h2>${s.qualified?'✅':'❌'} <b>${s.sym}</b> ${s.qualified?'Qualified':'Not Qualified'}</h2>
-   <table><tr><th>Key</th><th>Value</th></tr>
-     <tr><td>Entry</td><td>${s.price.toFixed(6)}</td></tr>
-     <tr><td>Resistance</td><td>${s.resLo.toFixed(6)}-${s.resHi.toFixed(6)}</td></tr>
-     <tr><td>Stop-Loss</td><td>${s.stop}</td></tr>
-     <tr><td>Targets</td><td>${tgt}</td></tr>
-     <tr><td>Risk:Reward</td><td>${s.rr}</td></tr>
-     <tr><td>Volume</td><td>${s.vol.toLocaleString()} / ${s.avgVol.toLocaleString()}</td></tr>
-     <tr><td>RSI</td><td>${s.rsi}</td></tr>
-   </table>
-   <table><thead><tr><th>Criteria (${s.passed}/7)</th><th>Status</th></tr></thead>
-     <tbody>${s.criteria.map(row).join("")}</tbody></table>
-   <p style="text-align:center;font-weight:bold;color:${s.qualified?'var(--pass)':'var(--fail)'}">
-    ${s.qualified?'✅ SETUP MEETS REQUIREMENTS':'❌ DOES NOT MEET REQUIREMENTS'}</p></div>`;
-}
+        // --- Run breakout detection for last 15 closed candles
+        detectETHBreakout();
+      };
+    }
 
-/* ----------  Scan loop ---------- */
-async function scan(){
-  const opt={
-    minRR:+document.getElementById("minRR").value||2,
-    minTargetPct:+document.getElementById("minTargetPercent").value||5,
-    volMult:+document.getElementById("volumeMultiplier").value||1.2
-  };
-  const tf=document.getElementById("timeframe").value,
-        wrap=document.getElementById("scanResults"),
-        btn=document.getElementById("scanButton");
-  wrap.innerHTML="";btn.disabled=true;
-  document.getElementById("coinsScanned").textContent="0";
-  document.getElementById("qualifiedSetups").textContent="0";
-  log("Fetching top 150 coins…");
-  const coins=await topCoins();
-  let setups=[],i=0;
-  for(const c of coins){
-    document.getElementById("coinsScanned").textContent=++i;
-    log(`[${i}/${coins.length}] ${c.symbol}`);
-    const res=await analyse(c.symbol,tf,opt);
-    if(!res.error&&res.qualified){setups.push(res);document.getElementById("qualifiedSetups").textContent=setups.length}
-    if(i%12===0)await sleep(900);
-  }
-  if(!setups.length)wrap.innerHTML="<p style='color:var(--fail);text-align:center'>No qualified setups.</p>";
-  else{
-    setups.sort((a,b)=>parseFloat(b.rr)-parseFloat(a.rr));
-    document.getElementById("avgRR").textContent=avg(setups.map(x=>+x.rr)).toFixed(2);
-    document.getElementById("avgTarget").textContent=
-      (avg(setups.map(x=>x.targets[0]?x.targets[0].pct:0))).toFixed(1)+"%";
-    setups.forEach(s=>render(s,wrap));
-  }
-  btn.disabled=false;
-}
+    function detectETHBreakout() {
+      const n = 15;
+      if (ethKlines.length < n+2) return;
+      // Extract closes, highs, lows, volumes
+      const closes = ethKlines.map(k=>k[4]);
+      const vols = ethKlines.map(k=>k[5]);
+      // 1. Downtrend & now recovery (last couple of closes > previous)
+      let wasDowntrend = closes.slice(-n-2,-2).every((v,i,a)=>v<a[i+1]);
+      let nowRecovery = closes[closes.length-1] > closes[closes.length-2];
+      // 2. 1.2x avg volume breakout on last candle
+      let avgVol = sma(vols.slice(-n-1,-1), n);
+      let lastVol = vols[vols.length-1];
+      let vRatio = lastVol/avgVol;
+      // 3. Show info and trigger notification
+      let msg = `Avg Vol (15): ${avgVol.toFixed(2)}<br>
+                 Last Vol: ${lastVol.toFixed(2)} (<b>${vRatio.toFixed(2)}x</b>)<br>
+                 Downtrend: <b>${wasDowntrend?'YES':'NO'}</b>,
+                 Recovery: <b>${nowRecovery?'YES':'NO'}</b><br>`;
+      let signal = '';
+      if (wasDowntrend && nowRecovery && vRatio>1.2) {
+        signal = '<span style="color:#56d456;font-weight:bold">Breakout Setup Detected! 🚀</span>';
+        showNotification("ETH/USDT BREAKOUT!", `Breakout on ETH/USDT!\nVol: ${vRatio.toFixed(2)}x`);
+      }
+      document.getElementById('eth-setup').innerHTML = msg + signal;
+    }
 
-/* ----------  Single-coin analyse ---------- */
-async function analyseOne(){
-  const inp=document.getElementById("individualCoinInput").value.trim().toUpperCase();
-  if(!inp)return;
-  const sym=inp.endsWith("USDT")?inp:inp+"USDT";
-  const tf=document.getElementById("timeframe").value;
-  const opt={
-    minRR:+document.getElementById("minRR").value||2,
-    minTargetPct:+document.getElementById("minTargetPercent").value||5,
-    volMult:+document.getElementById("volumeMultiplier").value||1.2
-  };
-  const out=document.getElementById("individualAnalysisResult");
-  out.innerHTML=`<p>Analyzing ${sym}…</p>`;
-  const res=await analyse(sym,tf,opt);
-  out.innerHTML=res.error?`<p style='color:var(--fail)'>${res.error}</p>`:"";
-  if(!res.error)render(res,out);
-}
+    function showNotification(title, body) {
+      if (!notificationSupported) return;
+      if (Notification.permission==='granted') {
+        new Notification(title, {body});
+      } else if (Notification.permission==='default') {
+        Notification.requestPermission().then(p=>{
+          if (p==='granted') new Notification(title, {body});
+        });
+      }
+    }
 
-/* ----------  Event bindings ---------- */
-document.getElementById("scanButton").onclick=scan;
-document.getElementById("analyzeCoinButton").onclick=analyseOne;
-log("Default volume-multiplier set to 1.2 × 30-bar average. Ready!");
-</script>
+    // ========== Scanner for Top 150 Coins ==========
+    async function scanMarket() {
+      const tf = document.getElementById('scan-timeframe').value;
+      document.getElementById('scan-status').innerText = "Fetching symbols...";
+      document.getElementById('results-table').innerHTML = '';
+      let symbols = [];
+      // 1. Fetch top 150 by volume from Binance
+      try {
+        // CORS warning: this may not work directly!
+        let resp = await fetch('https://api.binance.com/api/v3/ticker/24hr');
+        let data = await resp.json();
+        data = data.filter(t=>t.symbol.endsWith("USDT"));
+        data.sort((a,b)=>parseFloat(b.quoteVolume)-parseFloat(a.quoteVolume));
+        symbols = data.slice(0,150).map(t=>t.symbol.toLowerCase());
+      } catch(e) {
+        document.getElementById('scan-status').innerHTML = "API error! Try with CORS proxy or backend. Showing demo results.<br>"+e;
+        showScannerDemo();
+        return;
+      }
+      document.getElementById('scan-status').innerText = 'Scanning...';
+
+      // 2. Fetch klines for each symbol (limit 30)
+      let tf_map = { "1m":"1m", "5m":"5m", "15m":"15m", "1h":"1h", "4h":"4h"};
+      let results = [];
+      for (let i=0;i<symbols.length;i++) {
+        let s = symbols[i];
+        try {
+          let kUrl = `https://api.binance.com/api/v3/klines?symbol=${s.toUpperCase()}&interval=${tf_map[tf]}&limit=30`;
+          let kres = await fetch(kUrl); // CORS WARNING
+          let kdata = await kres.json();
+          // Convert [openTime,open,high,low,close,vol,...] to numbers
+          let klines = kdata.map(k=>[Number(k[0]),...k.slice(1,6).map(Number)]);
+          // Run detection
+          let res = analyzeSymbol(s, klines);
+          if (res) results.push(res);
+        } catch (e){/*skip symbol on error*/}
+        if(i%20===0) { document.getElementById('scan-status').innerText = `Scanning: ${i+1}/${symbols.length}`;}
+      }
+
+      // 3. Show results
+      renderTable(results);
+      document.getElementById('scan-status').innerHTML = `<b>Done:</b> ${results.length} setups detected.<br>
+        <span style="color:#f55;font-size:90%">Note: May need CORS proxy to fetch Binance REST APIs.</span>`;
+    }
+
+    // Analyze a symbol's klines for breakout and trade suggestion
+    function analyzeSymbol(symbol, klines) {
+      // Must have at least 17 klines
+      if (klines.length<17) return null;
+      let closes = klines.map(k=>k[4]);
+      let highs = klines.map(k=>k[2]);
+      let lows = klines.map(k=>k[3]);
+      let vols = klines.map(k=>k[5]);
+      // Downtrend? (majority closes down over 10 bars, or series of lowers)
+      let n = 13, last_n = closes.slice(-n-2,-2), isDown = last_n.every((v,i,a)=>v<=a[i+1]);
+      // Retrace detected? (last 2 closes > prev 2)
+      let retrace = closes.at(-1) > closes.at(-2) && closes.at(-2)>closes.at(-3);
+      // Resistance range: flat resistance
+      let resistance = Math.max(...highs.slice(-6,-2));
+      let attemptingBreak = closes.at(-1) > resistance*0.998; // Near resistance
+      // Volume spike
+      let avgVol = sma(vols.slice(-15,-1), 15);
+      let lastVol = vols.at(-1);
+      let volRatio = lastVol/avgVol;
+      // StochRSI < 30
+      let stochrsiVal = stochRsi(closes, 14);
+      // RSI bullish divergence: last close > prev, RSI turns up
+      let rsiNow = rsi(closes);
+      let rsiPrev = rsi(closes.slice(0,-1));
+      let bullishDiv = closes.at(-1)>closes.at(-2)&&rsiNow>rsiPrev&&rsiNow<50;
+      // MACD bullish signal
+      let macdObj = macd(closes);
+      let macdBull = (macdObj.macd > macdObj.signal && macdObj.macd<0);
+      let conds = [
+        isDown, retrace, attemptingBreak, volRatio>1.2, stochrsiVal<30, bullishDiv, macdBull
+      ];
+      if(conds.every(Boolean)){
+        // Calculate entry, stop, TP as per 1.5x ATR
+        let entry = closes.at(-1);
+        let mATR = atr(klines, 14) || (highs.at(-1)-lows.at(-1));
+        let stop = entry-(1.5*mATR);
+        let takeP = entry+mATR*2.2;
+        return {
+          symbol: symbol.toUpperCase(),
+          entry:entry.toFixed(4), stop:stop.toFixed(4), takeP:takeP.toFixed(4),
+          volRatio:volRatio.toFixed(2), stochrsi:stochrsiVal?.toFixed(1), 
+          rsi:rsiNow?.toFixed(1), macd:macdObj.macd?.toFixed(4), signal:macdObj.signal?.toFixed(4)
+        };
+      }
+      return null;
+    }
+
+    function renderTable(results){
+      let th = `<tr>
+        <th>Symbol</th><th>Entry</th><th>Stop</th><th>Take Profit</th>
+        <th>Volume xAvg</th><th>StochRSI</th><th>RSI</th>
+        <th>MACD</th><th>Signal</th>
+      </tr>`;
+      let rows = results.map(r=>`
+        <tr class="success">
+         <td>${r.symbol}</td>
+         <td>${r.entry}</td>
+         <td>${r.stop}</td>
+         <td>${r.takeP}</td>
+         <td>${r.volRatio}</td>
+         <td>${r.stochrsi}</td>
+         <td>${r.rsi}</td>
+         <td>${r.macd}</td>
+         <td>${r.signal}</td>
+        </tr>
+      `).join('');
+      document.getElementById('results-table').innerHTML = th+rows;
+    }
+
+    // Demo fallback for result table when CORS kicks in
+    function showScannerDemo() {
+      let ex = [{
+        symbol:'BTCUSDT', entry:'41955.20', stop:'41000.00', takeP:'43291.20',
+        volRatio:'1.37', stochrsi:'19.7', rsi:'34.2', macd:'-28.1999', signal:'-31.6851'
+      },{
+        symbol:'OPUSDT', entry:'2.4040', stop:'2.2920', takeP:'2.6660',
+        volRatio:'1.30', stochrsi:'17.2', rsi:'32.2', macd:'-0.0712', signal:'-0.0881'
+      }];
+      renderTable(ex);
+    }
+
+    // Get permission for notification on page load
+    if(notificationSupported && Notification.permission==='default'){
+      Notification.requestPermission();
+    }
+  </script>
 </body>
 </html>
